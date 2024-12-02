@@ -206,7 +206,8 @@ private:
 
     double target_heading_; // Target heading
     double crossTrackError_;
-    
+    double crossTrackError_lf_;
+
     double heading_gain_;
     double heading_term;
     double target_speed;
@@ -268,7 +269,7 @@ public:
         ego_heading_ = 0.0;
 
         crossTrackError_ = 0.0;        
-
+        crossTrackError_lf_ =0.0;
 
         heading_gain_ = 1.0;
         target_speed = 0.0;
@@ -362,12 +363,13 @@ public:
     }
 
 
-    void set_kimm_control_data(double target_heading, float ego_heading, double crossTrackError)
+    void set_kimm_control_data(double target_heading, float ego_heading, double crossTrackError, double crossTrackError_lf)
     {
 
         this->target_heading_ = nomalize_angle(target_heading);
         this->ego_heading_ = nomalize_angle(ego_heading);
         this->crossTrackError_ = crossTrackError;
+        this->crossTrackError_lf_ = crossTrackError_lf;
     }
 
     void set_odom(double cx, double cy)
@@ -439,9 +441,9 @@ public:
         double yr_const = this->target_speed / sqrt(pow(this->Lf,2) + pow(this->width/2.0 ,2));
 
         double tmp_headin_error = nomalize_angle(target_heading_ - ego_heading_);
-
+        double lat_error_term = kp_ / this->Lf * crossTrackError_lf_;
         // double tmp_headin_error = (target_heading_ - ego_heading_);
-        double target_yr = this->heading_gain_ * (tmp_headin_error);
+        double target_yr = this->heading_gain_ * (tmp_headin_error) + lat_error_term;
         target_yr = clip(target_yr, -yr_const, yr_const);
         
         double target_speed_constraints = - this->target_speed * abs(tmp_headin_error) / this->heading_err_range + this->target_speed;

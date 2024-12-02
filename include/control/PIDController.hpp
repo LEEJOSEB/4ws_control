@@ -28,6 +28,19 @@ struct GasAndBrake {
     double brake;
 };
 
+const double EPSILON = 1e-6; // 허용 오차
+
+bool isZero(double value) {
+    return std::abs(value) < EPSILON; // |value|이 EPSILON보다 작으면 0으로 간주
+}
+
+double applyLPF(double input, double prev_output, double alpha) {
+    if (isZero(input)) { // 값이 0인지 안전하게 확인
+        return 0.0;
+    }
+    return alpha * input + (1.0 - alpha) * prev_output;
+}
+
 // 두 점을 연결하는 벡터의 외적 계산
 double cross_product(Point p1, Point p2) {
     return p1.x * p2.y - p1.y * p2.x;

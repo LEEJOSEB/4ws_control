@@ -25,9 +25,11 @@ using namespace std;
 
 bool IS_PRINT = true;
 bool c_mode = false;
+int docking_mode = 0;
+int control_mode_pre  = 0;
 enum State {FORWARD, REVERSE};
 State state = FORWARD;
-
+double target_speed_x_prev = 0.0, target_speed_y_prev = 0.0, target_yr_prev = 0.0;
 ControlInput kimm_ci_dk;
 
 class CarControl : public rclcpp::Node
@@ -82,13 +84,13 @@ private:
     
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Time last_execution_time_ = now();
+
 public:
     CarControl()
         : Node("car_control")
         // <ROS 노드 선언>---------------------------------------------------------
     // ---------------------------------------------------------</ROS 노드 선언>
-    {
-        
+    {        
 
         // <클레스들 인스턴스화>------------------------------------------------------
         
@@ -166,11 +168,11 @@ public:
 
         // 요기!!!!
         double wheel_radius = 0.105;
-        double L = 0.6089794635772705 *2;
+        double L = 0.494 *2;
         double Lf = L / 2.0;
-        double width = 0.271 * 2;
+        double width = 0.364;
         double deltaMax = 3.141592/2.0 ;
-        
+
         int control_method = 0;
         int test = 1;
 
@@ -186,14 +188,17 @@ public:
         float wheel_steer_RR = cb_data->get_wheel_steer_RR();
 
         int control_mode = cb_data->get_control_mode();
-
-        // Point odom = 0.0;
-
+        
+        
         float yaw = cb_data->get_yaw();
         Point odom = cb_data->get_odom();
         double lat_error = cb_data->calc_n_get_lat_error();
         double yaw_rate = cb_data->get_yawrate();
-        
+
+        Point odom_lf;
+        odom_lf.x = Lf;
+        odom_lf.y = 0.0;
+        double lat_error_lf = cb_data->calc_n_get_lat_error(odom_lf);
         double path_curature = cb_data->calc_path_curvature_center(1.0);
         double pd_path_yaw = cb_data->get_pd_path_yaw();
         vector<Point> rel_local_path = cb_data->get_relative_path();
@@ -207,7 +212,7 @@ public:
 
         
 
-
+        
 
         // <계산> -----------------------------------------------------------
         param_manage->set_normal_param();
@@ -236,7 +241,7 @@ public:
         lat_control->set_curvature(path_curature);
 
         lat_control->set_kimm_target_speed(target_speed);
-        lat_control->set_kimm_control_data(pd_path_yaw, yaw, lat_error);
+        lat_control->set_kimm_control_data(pd_path_yaw, yaw, lat_error, lat_error_lf);
         lat_control->set_odom(odom.x, odom.y);
 
         
@@ -246,7 +251,25 @@ public:
         kimm_ci = lat_control->get_calc_control_input();
         steerAngle = lat_control->calc_combined_steer();
 
-        
+        if (control_mode == 2){
+            if (control_mode_pre ==  0){
+                docking_mode = 1;
+            }
+            else if (std::fabs(nomalize_angle(lat_control->get_yr_error())) < 0.02)
+            {
+                docking_mode = 2;
+            }
+            
+            
+        }
+
+        else if (control_mode == 0){
+            docking_mode = 0;
+        }
+
+
+        // Point odom = 0.0;
+        control_mode_pre = control_mode;
         double sat_min_value = 0.01;
         
         PointFR steerAngle_dk;
@@ -416,50 +439,76 @@ public:
         {
             c_mode_gain = 0.5;
         }
+        else{
+            docking_mode = 0;
+        }
+        // RCLCPP_INFO(this->get_logger(), "Docking_mode: %d, Control_mode: %d", docking_mode, control_mode);
         if (test)
         {
-            target_speed_x = kimm_ci.vx;
-            target_speed_y = kimm_ci.vy;
-            target_yr = kimm_ci.yr;
-
             if (control_mode == 1 || control_mode == 2)
             {
+
                 target_speed_x = kimm_ci_dk.vx;
                 target_speed_y = kimm_ci_dk.vy;
                 target_yr = kimm_ci_dk.yr;
+
+                if (docking_mode == 1){
+                    target_speed_x = 0;
+                    target_speed_y = 0;
+                }
+                else
+                {
+                    target_yr = 0;
+                }
+                
                 // cout << "Docking Mode!" << endl;
+            } 
+            else{
+                target_speed_x = kimm_ci.vx;
+                target_speed_y = 0;
+                target_yr = kimm_ci.yr;
             }
         }
 
+        
 
-        if(c_mode)
-        {
-            if (abs(target_speed_y) < abs(target_yr*(L/2)) * c_mode_gain * c_mode_condition)
-            {
-                c_mode = false;
-            }
-        }
-        else{
-            if (abs(target_speed_y)* c_mode_condition > abs(target_yr*(L/2)) * c_mode_gain)
-            {
-                c_mode = true;
-            }
-        }
+        // if(c_mode)
+        // {
+        //     if (abs(target_speed_y) < abs(target_yr*(L/2)) * c_mode_gain * c_mode_condition)
+        //     {
+        //         c_mode = false;
+        //     }
+        // }
+        // else{
+        //     if (abs(target_speed_y)* c_mode_condition > abs(target_yr*(L/2)) * c_mode_gain)
+        //     {
+        //         c_mode = true;
+        //     }
+        // }
 
 
-        if ((abs(target_speed_y) < 0.4) && (abs(target_yr*(L/2))  * c_mode_gain< 0.6)){
-            c_mode = false;
-        }
+        // if ((abs(target_speed_y) < 0.4) && (abs(target_yr*(L/2))  * c_mode_gain< 0.6)){
+        //     c_mode = false;
+        // }
 
-        if (c_mode){
-            target_yr = 0;
-        }
+        // if (c_mode){
+        //     target_yr = 0;
+        // }
 
-        else{
+        // else{
             
-            target_speed_y = 0; 
+        //     target_speed_y = 0; 
 
-        }
+        // }
+
+        double alpha = 0.006;
+        target_speed_x = applyLPF(target_speed_x, target_speed_x_prev, alpha);
+        target_speed_y = applyLPF(target_speed_y, target_speed_y_prev, alpha);
+        target_yr = applyLPF(target_yr, target_yr_prev, alpha);
+
+        target_speed_x_prev = target_speed_x; 
+        target_speed_y_prev = target_speed_y;
+        target_yr_prev = target_yr;
 
 
     
@@ -634,8 +683,8 @@ public:
         // 디버그용 토픽
         auto tmp_plot_val_msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
  
-        tmp_plot_val_msg->data.push_back(pd_path_yaw);                         //1
-        tmp_plot_val_msg->data.push_back(lat_error);                           //2
+        tmp_plot_val_msg->data.push_back(docking_mode);                         //1
+        tmp_plot_val_msg->data.push_back(control_mode);                           //2
         tmp_plot_val_msg->data.push_back(lat_control->get_x_error());  
         tmp_plot_val_msg->data.push_back(lat_control->get_y_error());                        //4
         tmp_plot_val_msg->data.push_back(nomalize_angle(lat_control->get_yr_error()));     //5
