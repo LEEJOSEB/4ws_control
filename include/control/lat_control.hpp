@@ -35,11 +35,11 @@ public:
         : prevCrossTrackError(0.0), integral(0.0)
     {
         //요기!!
-        Lf = 0.494/2;
-        Lr = 0.494/2;
-        L = 0.494;
-        width = 0.364;
+        L = 1.25;
+        Lf = L/2;
+        Lr = L/2;
         
+        width = 0.271*2;
         kp_ = 0.1;
         ki_ = 0.0;
         // kd_ = 1.5;
@@ -211,7 +211,7 @@ private:
     double heading_gain_;
     double heading_term;
     double target_speed;
-
+    double heading_error;
     double heading_err_range;
     
     double Lf;
@@ -267,7 +267,7 @@ public:
 
         target_heading_ = 0.0;
         ego_heading_ = 0.0;
-
+	heading_error = 0.0;
         crossTrackError_ = 0.0;        
         crossTrackError_lf_ =0.0;
 
@@ -275,11 +275,12 @@ public:
         target_speed = 0.0;
         heading_err_range = M_PI/2;
         // 요기!!
-        Lf = 0.494/2.0;
-        Lr = 0.494/2.0;
-        L = 0.494;
-        width = 0.364;
-
+        
+	L = 1.25;
+        Lf = L/2;
+        Lr = L/2;
+        
+        width = 0.271*2;
         cx_ = 0.0;
         cy_ = 0.0;
 
@@ -399,6 +400,11 @@ public:
     {
         return this->tmp_heading_error;
     }
+    
+    double get_heading_error()
+    {
+    	return this->heading_error;
+    }
 
     double PI_control(double error, double &integral_term, double kp, double ki, double anti_wu_max) 
     {
@@ -441,21 +447,25 @@ public:
         double yr_const = this->target_speed / sqrt(pow(this->Lf,2) + pow(this->width/2.0 ,2));
 
         double tmp_headin_error = nomalize_angle(target_heading_ - ego_heading_);
+        this->heading_error = tmp_headin_error;
         double lat_error_term = kp_ / this->Lf * crossTrackError_lf_;
         // double tmp_headin_error = (target_heading_ - ego_heading_);
         double target_yr = this->heading_gain_ * (tmp_headin_error) + lat_error_term;
         target_yr = clip(target_yr, -yr_const, yr_const);
         
         double target_speed_constraints = - this->target_speed * abs(tmp_headin_error) / this->heading_err_range + this->target_speed;
-        
+        if (target_speed_constraints > 0.0001)
+        {
+        	target_speed_constraints = target_speed;
+        }
         target_speed_constraints = clip(target_speed_constraints, 0.0, this->target_speed);
-
+	
         // Calculate the proportional term
         double target_vy = kp_ * crossTrackError_;
 
         target_vy = clip(target_vy, -target_speed_constraints, target_speed_constraints);
 
-        double target_vx = sqrt(pow(target_speed_constraints, 2) - pow(target_vy, 2));
+        double target_vx = clip(target_speed_constraints, 0.0, this->target_speed);
         
         
 
@@ -547,8 +557,9 @@ public:
 
         // 요기!!
         this->cb_data_ = cb_data;
-        L = 0.494;
-        width = 0.364;
+ 
+        L = 1.25;
+        width = 0.271*2;
         pre_com_steerF = 0;
         pre_com_steerR = 0;
         com_steer_alpha = 0.9;

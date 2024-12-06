@@ -31,6 +31,7 @@ enum State {FORWARD, REVERSE};
 State state = FORWARD;
 double target_speed_x_prev = 0.0, target_speed_y_prev = 0.0, target_yr_prev = 0.0;
 ControlInput kimm_ci_dk;
+bool turn_mode = false;
 
 class CarControl : public rclcpp::Node
 {
@@ -146,7 +147,7 @@ public:
 
         ranger_data_pub = this->create_publisher<std_msgs::msg::Float32MultiArray>("/Control/ranger_data", 1);
         tmp_data_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>("/Control/tmp_plot_val", 1);
-        cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("/ranger_mini/cmd_vel", 1);
+        cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("/base_controller/cmd_vel_unstamped", 1);
         issac_cmd_pub = this->create_publisher<sensor_msgs::msg::JointState>("/isaac_joint_commands", 1);
         // ------------------------------------------------------------</PUBLISHER>
         timer_ = this->create_wall_timer(std::chrono::milliseconds(10),
@@ -168,9 +169,9 @@ public:
 
         // 요기!!!!
         double wheel_radius = 0.105;
-        double L = 0.494 *2;
+        double L = 1.25;
         double Lf = L / 2.0;
-        double width = 0.364;
+        double width = 0.271*2;
         double deltaMax = 3.141592/2.0 ;
 
         int control_method = 0;
@@ -243,7 +244,7 @@ public:
         lat_control->set_kimm_target_speed(target_speed);
         lat_control->set_kimm_control_data(pd_path_yaw, yaw, lat_error, lat_error_lf);
         lat_control->set_odom(odom.x, odom.y);
-
+	double heading_error = lat_control->get_heading_error();
         
 
 
@@ -443,6 +444,30 @@ public:
             docking_mode = 0;
         }
         // RCLCPP_INFO(this->get_logger(), "Docking_mode: %d, Control_mode: %d", docking_mode, control_mode);
+        if (std::fabs(heading_error) > 0.523599)
+       	{
+             turn_mode = true;
+       	}
+	if (turn_mode && (std::fabs(heading_error) < 0.087266))
+	{
+             turn_mode = false;
+	}
+	
+        
+	if (turn_mode)
+	{
+	    if (heading_error < 0.0) {
+                target_yr = -target_speed / 0.625;
+            }
+            else if (heading_error > 0.0){
+                target_yr = target_speed / 0.625;
+            }
+            
+             target_speed_x = 0.0;
+             target_speed_y = 0.0;	
+	}
+
+
         if (test)
         {
             if (control_mode == 1 || control_mode == 2)
@@ -455,6 +480,12 @@ public:
                 if (docking_mode == 1){
                     target_speed_x = 0;
                     target_speed_y = 0;
+                    if (lat_control->get_yr_error() < 0.0) {
+               	 target_yr = -target_speed / 0.625;
+           	 }
+           	 else if (lat_control->get_yr_error() > 0.0){
+            	    target_yr = target_speed / 0.625;
+            	}
                 }
                 else
                 {
@@ -469,9 +500,10 @@ public:
                 target_yr = kimm_ci.yr;
             }
         }
-
         
-
+        
+        
+	
         // if(c_mode)
         // {
         //     if (abs(target_speed_y) < abs(target_yr*(L/2)) * c_mode_gain * c_mode_condition)
@@ -687,10 +719,10 @@ public:
         tmp_plot_val_msg->data.push_back(control_mode);                           //2
         tmp_plot_val_msg->data.push_back(lat_control->get_x_error());  
         tmp_plot_val_msg->data.push_back(lat_control->get_y_error());                        //4
-        tmp_plot_val_msg->data.push_back(nomalize_angle(lat_control->get_yr_error()));     //5
-        tmp_plot_val_msg->data.push_back(kimm_ci_dk.vx);                     //6
-        tmp_plot_val_msg->data.push_back(kimm_ci_dk.vy);                     //7
-        tmp_plot_val_msg->data.push_back(kimm_ci_dk.yr);                     //8
+        tmp_plot_val_msg->data.push_back((lat_control->get_yr_error()));     //5
+        tmp_plot_val_msg->data.push_back(lat_error);                     //6
+        tmp_plot_val_msg->data.push_back(nomalize_angle(pd_path_yaw- yaw));                     //7
+        tmp_plot_val_msg->data.push_back(pd_path_yaw);                     //8
         tmp_plot_val_msg->data.push_back(steerAngle_dk.F);                     //9 
         tmp_plot_val_msg->data.push_back(steerAngle_dk.R);  
         tmp_plot_val_msg->data.push_back(steerAngle_dk.FL);                     //9 
