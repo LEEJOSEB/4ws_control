@@ -8,6 +8,10 @@
 
 #include "control/PIDController.hpp"
 #include "control/callback_data_manage.hpp"
+#include "control/math_utils.hpp"
+
+
+using namespace math_utils; 
 
 class Stanley
 {
@@ -34,15 +38,13 @@ public:
     Stanley()
         : prevCrossTrackError(0.0), integral(0.0)
     {
-        //요기!!
-        L = 1.25;
+        L = 1.0;  // 기본값, updateVehicleParams에서 업데이트됨
         Lf = L/2;
         Lr = L/2;
+        width = 0.5;  // 기본값
         
-        width = 0.271*2;
         kp_ = 0.1;
         ki_ = 0.0;
-        // kd_ = 1.5;
         target_heading_ = 0.0;
         ego_heading_ = 0.0;
 
@@ -79,8 +81,8 @@ public:
     {
         this->speed_ = clip(speed, 0.9F, 10.0F);
 
-        this->target_heading_ = nomalize_angle(target_heading);
-        this->ego_heading_ = nomalize_angle(ego_heading);
+        this->target_heading_ = normalizeAngle(target_heading);
+        this->ego_heading_ = normalizeAngle(ego_heading);
         this->crossTrackError_ = crossTrackError;
         this->curvature_ = curvature; // 튜닝에 사용하는 param 일단은 0.0
     }
@@ -92,13 +94,13 @@ public:
         // Calculate the heading error
 
 
-        double tmp_headin_error = nomalize_angle(target_heading_ - ego_heading_);
+        double tmp_headin_error = normalizeAngle(target_heading_ - ego_heading_);
 
         // double tmp_headin_error = (target_heading_ - ego_heading_);
         double headingError = this->heading_gain_ * (tmp_headin_error);
 
         // Normalize the heading error to the range [-pi, pi]
-        // headingError = nomalize_angle(headingError);
+        // headingError = normalizeAngle(headingError);
         heading_term = headingError;
         // Calculate the proportional term
         double proportionalTerm = kp_ * crossTrackError_;
@@ -130,8 +132,8 @@ public:
         double steeringAngleR = headingErrorTermR + atan2(PID_steer, (0.1 + this->speed_)); 
         PointFR steeringAngle;
 
-        steeringAngle.F = nomalize_angle(steeringAngleF);
-        steeringAngle.R = nomalize_angle(steeringAngleR);
+        steeringAngle.F = normalizeAngle(steeringAngleF);
+        steeringAngle.R = normalizeAngle(steeringAngleR);
 
         return steeringAngle;
     }
@@ -160,6 +162,13 @@ public:
     {
         this->integral = inte_init;
     }
+
+    void updateStanleyParams(double wheelbase, double track_width) {
+        L = wheelbase;
+        width = track_width;
+        Lf = L/2;
+        Lr = L/2;
+    }
 };
 
 class FeedForward
@@ -171,8 +180,8 @@ private:
 public:
     FeedForward()
     {
-        Lf = 0.494/2;
-        Lr = 0.494/2;
+        Lf = 0.5;  // 기본값
+        Lr = 0.5;  // 기본값
     }
 
     void set_curvature(double curvature) 
@@ -193,6 +202,11 @@ public:
 
         return FF_SteerR;
     }
+
+    void updateFeedForwardParams(double wheelbase) {
+        Lf = wheelbase/2;
+        Lr = wheelbase/2;
+    }
 };
 
 
@@ -211,7 +225,7 @@ private:
     double heading_gain_;
     double heading_term;
     double target_speed;
-    double heading_error;
+
     double heading_err_range;
     
     double Lf;
@@ -264,10 +278,14 @@ public:
     KimmController()
     {      
         kp_ = 1.0;
+        L = 1.0;  // 기본값
+        Lf = L/2.0;
+        Lr = L/2.0;
+        width = 0.5;  // 기본값
 
         target_heading_ = 0.0;
         ego_heading_ = 0.0;
-	heading_error = 0.0;
+
         crossTrackError_ = 0.0;        
         crossTrackError_lf_ =0.0;
 
@@ -276,11 +294,6 @@ public:
         heading_err_range = M_PI/2;
         // 요기!!
         
-	L = 1.25;
-        Lf = L/2;
-        Lr = L/2;
-        
-        width = 0.271*2;
         cx_ = 0.0;
         cy_ = 0.0;
 
@@ -353,10 +366,6 @@ public:
         this->heading_gain_ = h_gain;
     }
 
-    void set_kimm_target_speed(double target_sp)
-    {
-        this->target_speed = target_sp;
-    }
 
     void set_kimm_hd_rangge_div(double hd_err_rangge_div)
     {
@@ -364,11 +373,11 @@ public:
     }
 
 
-    void set_kimm_control_data(double target_heading, float ego_heading, double crossTrackError, double crossTrackError_lf)
+    void set_kimm_control_data(double target_sp,double target_heading, float ego_heading, double crossTrackError, double crossTrackError_lf)
     {
-
-        this->target_heading_ = nomalize_angle(target_heading);
-        this->ego_heading_ = nomalize_angle(ego_heading);
+        this->target_speed = target_sp;
+        this->target_heading_ = normalizeAngle(target_heading);
+        this->ego_heading_ = normalizeAngle(ego_heading);
         this->crossTrackError_ = crossTrackError;
         this->crossTrackError_lf_ = crossTrackError_lf;
     }
@@ -399,11 +408,6 @@ public:
     double get_yr_error()
     {
         return this->tmp_heading_error;
-    }
-    
-    double get_heading_error()
-    {
-    	return this->heading_error;
     }
 
     double PI_control(double error, double &integral_term, double kp, double ki, double anti_wu_max) 
@@ -441,13 +445,12 @@ public:
         return proportional_term + ki * integral_term + derivative_term;
     }
 
-    ControlInput calc_control_input()
+    ControlInput calc_control_input_real_car()
     {
         // Calculate the heading error
         double yr_const = this->target_speed / sqrt(pow(this->Lf,2) + pow(this->width/2.0 ,2));
 
-        double tmp_headin_error = nomalize_angle(target_heading_ - ego_heading_);
-        this->heading_error = tmp_headin_error;
+        double tmp_headin_error = normalizeAngle(target_heading_ - ego_heading_);
         double lat_error_term = kp_ / this->Lf * crossTrackError_lf_;
         // double tmp_headin_error = (target_heading_ - ego_heading_);
         double target_yr = this->heading_gain_ * (tmp_headin_error) + lat_error_term;
@@ -458,15 +461,12 @@ public:
         {
         	target_speed_constraints = target_speed;
         }
+
         target_speed_constraints = clip(target_speed_constraints, 0.0, this->target_speed);
-	
+
         // Calculate the proportional term
-        double target_vy = kp_ * crossTrackError_;
-
-        target_vy = clip(target_vy, -target_speed_constraints, target_speed_constraints);
-
+        double target_vy = 0.0;
         double target_vx = clip(target_speed_constraints, 0.0, this->target_speed);
-        
         
 
 
@@ -480,27 +480,73 @@ public:
         return CI;
     }
 
+    double calc_static_yaw_rate()
+    {
+        double static_target_yr = 0.0;
+        if (get_yr_error() < 0.0) {
+            static_target_yr = -target_speed / Lf;
+        }
+        else if (get_yr_error() > 0.0){
+            static_target_yr = target_speed / Lf;
+        }
+        else{
+            static_target_yr = 0.0;
+        }
+
+        return static_target_yr;
+    }
+
+    ControlInput calc_control_input_sim()
+    {
+        // Calculate the heading error
+        double yr_const = this->target_speed / sqrt(pow(this->Lf,2) + pow(this->width/2.0 ,2));
+        double tmp_headin_error = normalizeAngle(target_heading_ - ego_heading_);
+
+        // double tmp_headin_error = (target_heading_ - ego_heading_);
+        double target_yr = this->heading_gain_ * (tmp_headin_error);
+        target_yr = -clip(target_yr, -yr_const, yr_const);
+
+        double target_speed_constraints = - this->target_speed * abs(tmp_headin_error) / this->heading_err_range + this->target_speed;
+        target_speed_constraints = clip(target_speed_constraints, 0.0, this->target_speed);
+
+        // Calculate the proportional term
+        double target_vy = -kp_ * crossTrackError_;
+        target_vy = clip(target_vy, -target_speed_constraints, target_speed_constraints);
+
+        double target_vx = sqrt(pow(target_speed_constraints, 2) - pow(target_vy, 2));
+        
+        ControlInput CI;
+        CI.vx = target_vx;
+        CI.vy = target_vy;
+        CI.yr = target_yr;
+        
+        return CI;
+    }
+
     ControlInput calc_docking_control_input(bool sub_flag)
     {
         
         this->tmp_x_error = (this->target_cx_ - this->cx_)*cos(ego_heading_) + (this->target_cy_ - this->cy_)*sin(ego_heading_);
         this->tmp_y_error = -(this->target_cx_ - this->cx_)*sin(ego_heading_) + (this->target_cy_ - this->cy_)*cos(ego_heading_);
-        this->tmp_heading_error = nomalize_angle(this->target_hd_ - ego_heading_);
+        this->tmp_heading_error = normalizeAngle(this->target_hd_ - ego_heading_);
 
         // double target_vx_dk = kp_dc_vx *tmp_x_error;
         // double target_vy_dk = -kp_dc_vy *tmp_y_error;
         // double target_yr_dk = -kp_dc_yr *tmp_headin_error;
 
         
-        if (sub_flag)
-        {
+        // if (sub_flag)
+        // {
            
-            this->target_vx_dk = PID_control(this->tmp_x_error, this->integral_x,this->pre_x, kp_dc_vx, ki_dc_vx, kd_dc_vx, vx_anti_windup_max_);
-            this->target_vy_dk = PID_control(this->tmp_y_error, this->integral_y,this->pre_y, kp_dc_vy, ki_dc_vy, kd_dc_vy, vy_anti_windup_max_);
-            this->target_yr_dk = PID_control(this->tmp_heading_error, this->integral_yr,this->pre_yr, kp_dc_yr, ki_dc_yr, kd_dc_yr ,yr_anti_windup_max_);
+        //     this->target_vx_dk = PID_control(this->tmp_x_error, this->integral_x,this->pre_x, kp_dc_vx, ki_dc_vx, kd_dc_vx, vx_anti_windup_max_);
+        //     this->target_vy_dk = PID_control(this->tmp_y_error, this->integral_y,this->pre_y, kp_dc_vy, ki_dc_vy, kd_dc_vy, vy_anti_windup_max_);
+        //     this->target_yr_dk = PID_control(this->tmp_heading_error, this->integral_yr,this->pre_yr, kp_dc_yr, ki_dc_yr, kd_dc_yr ,yr_anti_windup_max_);
 
-        }
+        // }
         
+        this->target_vx_dk = PID_control(this->tmp_x_error, this->integral_x,this->pre_x, kp_dc_vx, ki_dc_vx, kd_dc_vx, vx_anti_windup_max_);
+        this->target_vy_dk = PID_control(this->tmp_y_error, this->integral_y,this->pre_y, kp_dc_vy, ki_dc_vy, kd_dc_vy, vy_anti_windup_max_);
+        this->target_yr_dk = PID_control(this->tmp_heading_error, this->integral_yr,this->pre_yr, kp_dc_yr, ki_dc_yr, kd_dc_yr ,yr_anti_windup_max_);
 
 
         
@@ -525,7 +571,12 @@ public:
         return CI_ck;
     }
 
-
+    void updateKimmParams(double wheelbase, double track_width) {
+        L = wheelbase;
+        width = track_width;
+        Lf = L/2.0;
+        Lr = L/2.0;
+    }
 
 };
 
@@ -552,14 +603,13 @@ private:
 public:
     CombinedSteer(CallbackClass *cb_data)
         : FeedForward(), Stanley(),KimmController(), FF_weight_(1),
-          stanly_weight_(1), deltaMax(3.141592/2.0 * 89.999 / 90.0) // 89.9sda
+          stanly_weight_(1), deltaMax(M_PI/2.0 * 89.999 / 90.0)
     {
 
         // 요기!!
         this->cb_data_ = cb_data;
- 
-        L = 1.25;
-        width = 0.271*2;
+        L = 1.0;  // 기본값
+        width = 0.5;  // 기본값
         pre_com_steerF = 0;
         pre_com_steerR = 0;
         com_steer_alpha = 0.9;
@@ -570,7 +620,7 @@ public:
     ControlInput get_calc_control_input()
     {
         ControlInput tmp_control_input;
-        tmp_control_input = calc_control_input();
+        tmp_control_input = calc_control_input_sim();
     
         return tmp_control_input;
 
@@ -617,8 +667,8 @@ public:
         double combined_steerF = clip(combinedSteering.F, -deltaMax, deltaMax);
         double combined_steerR = clip(combinedSteering.R, -deltaMax, deltaMax);
 
-        double com_lpf_steerF = low_pass_filter(combined_steerF, pre_com_steerF, com_steer_alpha);
-        double com_lpf_steerR = low_pass_filter(combined_steerR, pre_com_steerR, com_steer_alpha);
+        double com_lpf_steerF = lowPassFilter(combined_steerF, pre_com_steerF, com_steer_alpha);
+        double com_lpf_steerR = lowPassFilter(combined_steerR, pre_com_steerR, com_steer_alpha);
 
         pre_com_steerF = com_lpf_steerF;
         pre_com_steerR = com_lpf_steerR;
@@ -634,10 +684,10 @@ public:
         com_lpf_steer.RR = atan2(tan(com_lpf_steerR) , (1 + (width/(2*L)) * (tan(com_lpf_steerF) - tan(com_lpf_steerR)))); //4ws
         
         
-        com_lpf_steer.FL = nomalize_angle(com_lpf_steer.FL);
-        com_lpf_steer.FR = nomalize_angle(com_lpf_steer.FR);
-        com_lpf_steer.RL = nomalize_angle(com_lpf_steer.RL);
-        com_lpf_steer.RR = nomalize_angle(com_lpf_steer.RR);
+        com_lpf_steer.FL = normalizeAngle(com_lpf_steer.FL);
+        com_lpf_steer.FR = normalizeAngle(com_lpf_steer.FR);
+        com_lpf_steer.RL = normalizeAngle(com_lpf_steer.RL);
+        com_lpf_steer.RR = normalizeAngle(com_lpf_steer.RR);
 
         com_lpf_steer.FL = clip(com_lpf_steer.FL, -deltaMax, deltaMax);
         com_lpf_steer.FR = clip(com_lpf_steer.FR, -deltaMax, deltaMax);
@@ -669,6 +719,17 @@ public:
     }    
 
 
+    void updateVehicleParams(double wheelbase, double track_width, double max_steer_angle) {
+        // 부모 클래스들의 파라미터 업데이트
+        Stanley::updateStanleyParams(wheelbase, track_width);
+        FeedForward::updateFeedForwardParams(wheelbase);
+        KimmController::updateKimmParams(wheelbase, track_width);
+        
+        // CombinedSteer 자체 파라미터 업데이트
+        L = wheelbase;
+        width = track_width;
+        deltaMax = max_steer_angle * 89.999 / 90.0;
+    }
 };
 
 #endif // LAT_CONTROLLERS_HPP

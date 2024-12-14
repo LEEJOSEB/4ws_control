@@ -24,11 +24,12 @@
 
 #include "control/PIDController.hpp"
 #include "control/kalman_filter.hpp"
-
+#include "control/math_utils.hpp"
 // #include "ranger_msgs/msg/actuator_state_array.hpp"
 // #include "ranger_msgs/msg/actuator_state.hpp"
 // #include "ranger_msgs/msg/motor_state.hpp"
 using namespace std;
+using namespace math_utils; 
 
 class CallbackClass
 {
@@ -445,7 +446,7 @@ public:
         }
 
         // lat_error의 좌 우를 구분함.
-        double l_or_r = determine_side(pl_local_path[closest_index + 1], predict_pose, pl_local_path[closest_index]);
+        double l_or_r = determineSide(pl_local_path[closest_index + 1], predict_pose, pl_local_path[closest_index]);
         if (l_or_r > 0)
         {
             min_distance = min_distance * -1;
@@ -514,10 +515,10 @@ public:
         }
 
     
-        double yaw_diff = abs(nomalize_angle(pl_local_path_yaws[f_pri_yaw_index] - pl_local_path_yaws[s_pri_yaw_index]));
+        double yaw_diff = abs(normalizeAngle(pl_local_path_yaws[f_pri_yaw_index] - pl_local_path_yaws[s_pri_yaw_index]));
 
         double tmp_curv = yaw_diff / diff_s;
-        this->path_curvature = low_pass_filter(tmp_curv, pre_path_curvature, 1.0);
+        this->path_curvature = lowPassFilter(tmp_curv, pre_path_curvature, 1.0);
         this->pre_path_curvature = this->path_curvature;
 
         return path_curvature;

@@ -1,105 +1,9 @@
-#ifndef PID_CONTROLLER_HPP
-#define PID_CONTROLLER_HPP
-
+#pragma once
+#include "basic_types.hpp"
+#include "math_utils.hpp"
 #include <cmath>
 
-struct Point {
-    double x;
-    double y;
-};
-
-struct PointFR {
-    double F;
-    double R;
-    double FL;
-    double FR;
-    double RL;
-    double RR;
-};
-
-struct ControlInput {
-    double vx;
-    double vy;
-    double yr;
-};
-
-struct GasAndBrake {
-    double gas;
-    double brake;
-};
-
-const double EPSILON = 1e-6; // 허용 오차
-
-bool isZero(double value) {
-    return std::abs(value) < EPSILON; // |value|이 EPSILON보다 작으면 0으로 간주
-}
-
-double applyLPF(double input, double prev_output, double alpha) {
-    if (isZero(input)) { // 값이 0인지 안전하게 확인
-        return 0.0;
-    }
-    return alpha * input + (1.0 - alpha) * prev_output;
-}
-
-// 두 점을 연결하는 벡터의 외적 계산
-double cross_product(Point p1, Point p2) {
-    return p1.x * p2.y - p1.y * p2.x;
-}
-
-double determine_side(Point reference, Point target, Point origin) {
-    double cross = 0.0;
-    Point refVector = {reference.x - origin.x, reference.y - origin.y};
-    Point targetVector = {target.x - origin.x, target.y - origin.y};
-
-    return cross = cross_product(refVector, targetVector);
-}
-
-double satuation_abs(double val, double s) {
-    if (val >= 0 and val < s){
-        val = s;
-    }
-    else if (val < 0 and val > -s) {
-        val = -s;
-    }
-
-    return val;
-}
-
-template <typename T>
-T clip(const T &value, const T &min_val, const T &max_val)
-{
-    return std::max(min_val, std::min(value, max_val));
-}
-
-double low_pass_filter(double val, double pre_val, float alpha)
-{
-    return val * alpha + pre_val * (1-alpha);
-}
-
-double nomalize_angle(double rad_angle)
-{
-    double rad_ang = rad_angle;
-    while (rad_ang > M_PI)
-        rad_ang -= 2 * M_PI;
-    while (rad_ang < -M_PI)
-        rad_ang += 2 * M_PI;
-    return rad_ang;
-}
-
-double sign_determinater(double df, double dr){
-    double diff_delta = df - dr;
-    double sign = 0.0;
-
-    if (diff_delta >= 0){
-        sign = 1.0;
-    }
-    else{
-        sign = -1.0;
-    }
-
-    return sign;
-}
-
+using namespace math_utils; 
 
 class PIDController
 {
@@ -124,16 +28,11 @@ public:
         double derivative = (error - prev_error_) / dt;
         prev_error_ = error;
 
-        derivative = low_pass_filter(derivative, pre_derivative_, alpha);
+        derivative = lowPassFilter(derivative, pre_derivative_, alpha);
         pre_derivative_ = derivative;
 
         double output = kp_ * error + ki_ * integral_ + kd_ * derivative;
-        if (output < min_output_)
-        {
-            output = min_output_;
-        } else if (output > max_output_){
-            output = max_output_;
-        }
+        output = clip(output, min_output_, max_output_);
 
         return output;
     }
@@ -149,5 +48,3 @@ private:
 
     double pre_derivative_ = 0.0;
 };
-
-#endif  // PID_CONTROLLER_HPP

@@ -11,39 +11,32 @@
 #include <chrono>
 
 #include "control/callback_data_manage.hpp"
-#include "control/PIDController.hpp"
 #include "control/lat_control.hpp"
 #include "control/lon_control.hpp"
 #include "control/mission_param.hpp"
 #include "control/kalman_filter.hpp"
+#include "control/control_types.hpp"
+#include "control/motion_calculator.hpp"
+#include "control/math_utils.hpp"
 
 // #include "ranger_msgs/msg/actuator_state_array.hpp"
 // #include "ranger_msgs/msg/actuator_state.hpp"
 // #include "ranger_msgs/msg/motor_state.hpp"
 
 using namespace std;
-
-bool IS_PRINT = true;
-bool c_mode = false;
-int docking_mode = 0;
-int control_mode_pre  = 0;
-enum State {FORWARD, REVERSE};
-State state = FORWARD;
-double target_speed_x_prev = 0.0, target_speed_y_prev = 0.0, target_yr_prev = 0.0;
-ControlInput kimm_ci_dk;
-bool turn_mode = false;
+using namespace math_utils;
 
 class CarControl : public rclcpp::Node
 {
 private:
     std::shared_ptr<KalmanFilter2D> km_filter_ptr;
-    KalmanFilter2D *km_filter;
+    KalmanFilter2D* km_filter;
     
     std::shared_ptr<CallbackClass> callback_data_ptr;
-    CallbackClass *cb_data;
+    CallbackClass* cb_data;
 
     std::shared_ptr<CombinedSteer> lat_control_ptr;
-    CombinedSteer *lat_control;
+    CombinedSteer* lat_control;
 
     std::shared_ptr<LonController> lon_control_ptr;
     std::shared_ptr<LonController> lon_control_ptr_fl;
@@ -51,15 +44,15 @@ private:
     std::shared_ptr<LonController> lon_control_ptr_rl;
     std::shared_ptr<LonController> lon_control_ptr_rr;
 
-    LonController *lon_control;
-    LonController *lon_control_fl;
-    LonController *lon_control_fr;
-    LonController *lon_control_rl;
-    LonController *lon_control_rr;
+    LonController* lon_control;
+    LonController* lon_control_fl;
+    LonController* lon_control_fr;
+    LonController* lon_control_rl;
+    LonController* lon_control_rr;
     
 
-    std::shared_ptr<ControlGainTuning> param_manage_ptr;  
-    ControlGainTuning *param_manage;
+    std::shared_ptr<ControlGainTuning> param_manage_ptr;
+    ControlGainTuning* param_manage;
 
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr lo_odom_sub;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr lo_curr_sub;
@@ -84,7 +77,21 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr issac_cmd_pub;
     
     rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Time last_execution_time_ = now();
+    rclcpp::Time last_execution_time_;
+    double time_diff_ms_;
+    bool IS_PRINT = true;
+    bool c_mode = false;
+    int docking_mode = 0;
+    ControlMode control_mode_pre = ControlMode::NORMAL;  
+    DrivingState driving_state = DrivingState::FORWARD;
+    double target_speed_x_prev = 0.0, target_speed_y_prev = 0.0, target_yr_prev = 0.0;
+    ControlInput kimm_ci_dk;
+
+    double wheel_radius;
+    double L;
+    double Lf;
+    double width;
+    double deltaMax;
 
 public:
     CarControl()
@@ -123,12 +130,12 @@ public:
         // <SUBSCRIBER> -----------------------------------------------------------
         
         // Local
-        lo_odom_sub = this->create_subscription<std_msgs::msg::Float64MultiArray>("/Local/utm", 1, std::bind(&CallbackClass::lo_odom_cb, cb_data, std::placeholders::_1));
-        lo_curr_sub = this->create_subscription<std_msgs::msg::Float64>("/Local/heading", 1, std::bind(&CallbackClass::lo_yaw_cb, cb_data, std::placeholders::_1));
+        lo_odom_sub = this->create_subscription<std_msgs::msg::Float64MultiArray>("/odom_gt", 1, std::bind(&CallbackClass::lo_odom_cb, cb_data, std::placeholders::_1));
+        lo_curr_sub = this->create_subscription<std_msgs::msg::Float64>("/heading", 1, std::bind(&CallbackClass::lo_yaw_cb, cb_data, std::placeholders::_1));
         // lo_imu__sub = this->create_subscription<sensor_msgs::msg::Imu>("/Local/imu_hpc/out", 1, std::bind(&CallbackClass::lo_imu_cb, cb_data, std::placeholders::_1));
         
         // Planning
-        pl_local_sub = this->create_subscription<nav_msgs::msg::Path>("/Planning/local_path", 1, std::bind(&CallbackClass::pl_local_path_cb, cb_data, std::placeholders::_1));
+        pl_local_sub = this->create_subscription<nav_msgs::msg::Path>("/path_drone", 1, std::bind(&CallbackClass::pl_local_path_cb, cb_data, std::placeholders::_1));
         pl_control_flag_sub = this->create_subscription<std_msgs::msg::Bool>("/Planning/Control_SW", 1, std::bind(&CallbackClass::pl_control_sw_cb, cb_data, std::placeholders::_1));
         
         issac_state_sub = this->create_subscription<sensor_msgs::msg::JointState>("/isaac_joint_states", 1, std::bind(&CallbackClass::issac_state_cb, cb_data, std::placeholders::_1));
@@ -147,7 +154,7 @@ public:
 
         ranger_data_pub = this->create_publisher<std_msgs::msg::Float32MultiArray>("/Control/ranger_data", 1);
         tmp_data_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>("/Control/tmp_plot_val", 1);
-        cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("/base_controller/cmd_vel_unstamped", 1);
+        cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("/ranger_mini/cmd_vel", 1);
         issac_cmd_pub = this->create_publisher<sensor_msgs::msg::JointState>("/isaac_joint_commands", 1);
         // ------------------------------------------------------------</PUBLISHER>
         timer_ = this->create_wall_timer(std::chrono::milliseconds(10),
@@ -156,519 +163,362 @@ public:
         
     }
 
-    void timer_callback()
-    {
-
-        auto start_time = std::chrono::steady_clock::now();
-        rclcpp::Time current_time = now();
+private:
+    void timer_callback() {
+        // auto start_time = std::chrono::steady_clock::now();
+        // rclcpp::Time current_time = this->now();
         
-        auto time_diff = current_time - last_execution_time_;
-        last_execution_time_ = now();
-        double time_diff_ms = time_diff.seconds() * 1000.0;
-        last_execution_time_ = current_time;
-
-        // 요기!!!!
-        double wheel_radius = 0.105;
-        double L = 1.25;
-        double Lf = L / 2.0;
-        double width = 0.271*2;
-        double deltaMax = 3.141592/2.0 ;
-
-        int control_method = 0;
-        int test = 1;
-
-        float curr_speed = cb_data->get_speed();
-        float wheel_speed_FL = cb_data->get_wheel_speed_FL(); // m/s 
-        float wheel_speed_FR = cb_data->get_wheel_speed_FR(); // m/s 
-        float wheel_speed_RL = cb_data->get_wheel_speed_RL(); // m/s 
-        float wheel_speed_RR = cb_data->get_wheel_speed_RR(); // m/s 
-
-        float wheel_steer_FL = cb_data->get_wheel_steer_FL();
-        float wheel_steer_FR = cb_data->get_wheel_steer_FR();
-        float wheel_steer_RL = cb_data->get_wheel_steer_RL();
-        float wheel_steer_RR = cb_data->get_wheel_steer_RR();
-
-        int control_mode = cb_data->get_control_mode();
-        
-        
-        float yaw = cb_data->get_yaw();
-        Point odom = cb_data->get_odom();
-        double lat_error = cb_data->calc_n_get_lat_error();
-        double yaw_rate = cb_data->get_yawrate();
-
-        Point odom_lf;
-        odom_lf.x = Lf;
-        odom_lf.y = 0.0;
-        double lat_error_lf = cb_data->calc_n_get_lat_error(odom_lf);
-        double path_curature = cb_data->calc_path_curvature_center(1.0);
-        double pd_path_yaw = cb_data->get_pd_path_yaw();
-        vector<Point> rel_local_path = cb_data->get_relative_path();
-
-        // lat_error가 404면 뭔가 잘못됨.
-        if (lat_error == 404 || pd_path_yaw == 404)
-        {
-            cout << "404!!!" << endl;
-            // return;
-        }
-
-        
-
-        
-
-        // <계산> -----------------------------------------------------------
-        param_manage->set_normal_param();
-
-        // Control Switch
-        // int cs = cb_data->get_control_switch();
-        bool control_sw = cb_data->get_control_sw();
-
-        GasAndBrake acc_val_FL;
-        GasAndBrake acc_val_FR;
-        GasAndBrake acc_val_RL;
-        GasAndBrake acc_val_RR;
-
-        PointFR steerAngle;
-
-        double target_speed = lon_control->get_target_speed() / 3.6;
-        
-
-        double target_speed_FR;
-        double target_speed_FL;
-        double target_speed_RR;
-        double target_speed_RL;
-
-
-        lat_control->set_stanly_data(curr_speed, pd_path_yaw, yaw, lat_error);
-        lat_control->set_curvature(path_curature);
-
-        lat_control->set_kimm_target_speed(target_speed);
-        lat_control->set_kimm_control_data(pd_path_yaw, yaw, lat_error, lat_error_lf);
-        lat_control->set_odom(odom.x, odom.y);
-	double heading_error = lat_control->get_heading_error();
-        
-
-
-        ControlInput kimm_ci;
-        kimm_ci = lat_control->get_calc_control_input();
-        steerAngle = lat_control->calc_combined_steer();
-
-        if (control_mode == 2){
-            if (control_mode_pre ==  0){
-                docking_mode = 1;
-            }
-            else if (std::fabs(nomalize_angle(lat_control->get_yr_error())) < 0.02)
-            {
-                docking_mode = 2;
-            }
-            
-            
-        }
-
-        else if (control_mode == 0){
-            docking_mode = 0;
-        }
-
-
-        // Point odom = 0.0;
-        control_mode_pre = control_mode;
-        double sat_min_value = 0.01;
-        
-        PointFR steerAngle_dk;
-        double target_speed_dk_FL;
-        double target_speed_dk_FR;
-        double target_speed_dk_RL;
-        double target_speed_dk_RR;
-
-                        
-
-        if (control_mode == 1 || control_mode == 2)
-        {
-            lat_control->set_goal_point(cb_data->get_target_point_x(),cb_data->get_target_point_y(),cb_data->get_target_point_yaw());
-            kimm_ci_dk = lat_control->get_calc_docking_control_input();
-
-            double vx_safe = kimm_ci_dk.vx;
-            if (vx_safe > -sat_min_value && vx_safe < sat_min_value) {
-                vx_safe = (vx_safe >= 0.0) ? sat_min_value : -sat_min_value;  // Set to 0.01 if positive, -0.01 if negative
-            }
-            double beta_dk = atan(kimm_ci_dk.vy / vx_safe);
-
-            double Rc_dem = clip(pow(kimm_ci_dk.yr, 2), sat_min_value, std::numeric_limits<double>::infinity());
-            
-            // double Rc_dk = sqrt(pow(kimm_ci_dk.vx, 2) + pow(kimm_ci_dk.vy, 2)) * kimm_ci_dk.yr / Rc_dem;
-            double Rc_dk = (kimm_ci_dk.yr * kimm_ci_dk.vy - kimm_ci_dk.yr * kimm_ci_dk.vx)/ Rc_dem;
-
-            
-            double R_dk = Rc_dk * cos(beta_dk);
-
-            
-
-            
-            double epsilon = 0.1;
-
-            if (state == FORWARD && kimm_ci_dk.vx < -epsilon) {
-                state = REVERSE;
-            }
-            else if ( (state == REVERSE && kimm_ci_dk.vx > epsilon) ){
-                state = FORWARD;
-            }
-
-            double vx_sign = 1.0;
-
-            if (state == FORWARD){
-                vx_sign = 1.0;
-            }
-            else{
-                vx_sign = -1.0;
-            }
-            steerAngle_dk.F = atan((kimm_ci_dk.yr * L / 2 + kimm_ci_dk.vy) / std::fabs(kimm_ci_dk.vx)*vx_sign);
-            steerAngle_dk.R = atan((-kimm_ci_dk.yr * L / 2 + kimm_ci_dk.vy) / std::fabs(kimm_ci_dk.vx)*vx_sign);
-        
-            // steerAngle_dk.F = atan((kimm_ci_dk.yr * L / 2 + kimm_ci_dk.vy) / (state == REVERSE) ? -std::fabs(kimm_ci_dk.vx) : std::fabs(kimm_ci_dk.vx));
-            // steerAngle_dk.R = atan((-kimm_ci_dk.yr * L / 2 + kimm_ci_dk.vy) / (state == REVERSE) ? -std::fabs(kimm_ci_dk.vx) : std::fabs(kimm_ci_dk.vx));
-            // steerAngle_dk.F = atan((Rc_dk * sin(beta_dk) + L/2) / R_dk);
-            // steerAngle_dk.R = atan((Rc_dk * sin(beta_dk) - L/2) / R_dk);
-
-            steerAngle_dk.FL = atan2(tan(steerAngle_dk.F) , (1 - (width/(2*L)) * (tan(steerAngle_dk.F) - tan(steerAngle_dk.R)))); //4ws
-            steerAngle_dk.FR = atan2(tan(steerAngle_dk.F) , (1 + (width/(2*L)) * (tan(steerAngle_dk.F) - tan(steerAngle_dk.R)))); //4ws
-            steerAngle_dk.RL = atan2(tan(steerAngle_dk.R) , (1 - (width/(2*L)) * (tan(steerAngle_dk.F) - tan(steerAngle_dk.R)))); //4ws
-            steerAngle_dk.RR = atan2(tan(steerAngle_dk.R) , (1 + (width/(2*L)) * (tan(steerAngle_dk.F) - tan(steerAngle_dk.R)))); //4ws
-            
-            
-            steerAngle_dk.FL = nomalize_angle(steerAngle_dk.FL);
-            steerAngle_dk.FR = nomalize_angle(steerAngle_dk.FR);
-            steerAngle_dk.RL = nomalize_angle(steerAngle_dk.RL);
-            steerAngle_dk.RR = nomalize_angle(steerAngle_dk.RR);
-
-            steerAngle_dk.FL = clip(steerAngle_dk.FL, -deltaMax, deltaMax);
-            steerAngle_dk.FR = clip(steerAngle_dk.FR, -deltaMax, deltaMax);
-            steerAngle_dk.RL = clip(steerAngle_dk.RL, -deltaMax, deltaMax);
-            steerAngle_dk.RR = clip(steerAngle_dk.RR, -deltaMax, deltaMax);
-            
-
-            target_speed_dk_FL = kimm_ci_dk.vx * cos(steerAngle_dk.FL) - kimm_ci_dk.yr * cos(steerAngle_dk.FL) * width / 2 \
-                            + kimm_ci_dk.yr * sin(steerAngle_dk.FL) * L / 2 + kimm_ci_dk.vy * sin(steerAngle_dk.FL);
-
-            target_speed_dk_FR = kimm_ci_dk.vx * cos(steerAngle_dk.FR) + kimm_ci_dk.yr * cos(steerAngle_dk.FR) * width / 2 \
-                            + kimm_ci_dk.yr * sin(steerAngle_dk.FR) * L / 2 + kimm_ci_dk.vy * sin(steerAngle_dk.FR);
-
-            target_speed_dk_RL = kimm_ci_dk.vx * cos(steerAngle_dk.RL) - kimm_ci_dk.yr * cos(steerAngle_dk.RL) * width / 2 \
-                            - kimm_ci_dk.yr * sin(steerAngle_dk.RL) * L / 2 + kimm_ci_dk.vy * sin(steerAngle_dk.RL);
-
-            target_speed_dk_RR = kimm_ci_dk.vx * cos(steerAngle_dk.RR) + kimm_ci_dk.yr * cos(steerAngle_dk.RR) * width / 2 \
-                            - kimm_ci_dk.yr * sin(steerAngle_dk.RR) * L / 2 + kimm_ci_dk.vy * sin(steerAngle_dk.RR);
-
-
-            kimm_ci_dk.vx = std::fabs(kimm_ci_dk.vx)*vx_sign;
-
-            if (std::fabs(kimm_ci_dk.vx) < 0.05)
-            {
-                kimm_ci_dk.vx = 0.0;   
-            }
-        }
-        
-
-        
-        
-        
-
-        
-
-        
-
-
-        //
-        double target_yr = 0.0;
-        double target_speed_x = 0.0;
-        double target_speed_y = 0.0;
-
-        double R = L * (cos(steerAngle.F) * cos(steerAngle.R)) / satuation_abs((sin(steerAngle.F) * cos(steerAngle.R) - sin(steerAngle.R) * cos(steerAngle.F)), 0.0000001);
-        double Rf = R / cos(steerAngle.F);
-        double Rr = R / cos(steerAngle.R);
-
-        double target_beta = atan( ((R * sin(steerAngle.F) - Lf * cos(steerAngle.F)) / cos(steerAngle.F)) * (1 / R));
-        double Rc = R / cos(target_beta);
-
-        if (abs(Rf) > abs(Rr))
-        {
-            target_yr = target_speed / Rf;
-        }
-        else
-        {
-            target_yr = target_speed / Rr;
-        }
-
-        
-        target_speed_x = target_yr * Rc * cos(target_beta);
-        target_speed_y = target_yr * Rc * sin(target_beta);
-
-
-
-        target_speed_FL = target_speed_x * cos(steerAngle.FL) - target_yr * cos(steerAngle.FL) * width / 2 \
-                        + target_yr * sin(steerAngle.FL) * L / 2 + target_speed_y * sin(steerAngle.FL);
-
-        target_speed_FR = target_speed_x * cos(steerAngle.FR) + target_yr * cos(steerAngle.FR) * width / 2 \
-                        + target_yr * sin(steerAngle.FR) * L / 2 + target_speed_y * sin(steerAngle.FR);
-
-        target_speed_RL = target_speed_x * cos(steerAngle.RL) - target_yr * cos(steerAngle.RL) * width / 2 \
-                        - target_yr * sin(steerAngle.RL) * L / 2 + target_speed_y * sin(steerAngle.RL);
-
-        target_speed_RR = target_speed_x * cos(steerAngle.RR) + target_yr * cos(steerAngle.RR) * width / 2 \
-                        + target_yr * sin(steerAngle.RR) * L / 2 + target_speed_y * sin(steerAngle.RR);
-
-
-
-
-        lon_control_fl->set_lon_target_speed(target_speed_dk_FL);
-        lon_control_fl->set_lon_data(wheel_speed_FL);
-        acc_val_FL = lon_control_fl->calc_gas_n_brake();
-
-        lon_control_fr->set_lon_target_speed(target_speed_dk_FR);                                              
-        lon_control_fr->set_lon_data(wheel_speed_FR);
-        acc_val_FR = lon_control_fr->calc_gas_n_brake();
-
-        lon_control_rl->set_lon_target_speed(target_speed_dk_RL);
-        lon_control_rl->set_lon_data(wheel_speed_RL);
-        acc_val_RL = lon_control_rl->calc_gas_n_brake();
-
-        lon_control_rr->set_lon_target_speed(target_speed_dk_RR);
-        lon_control_rr->set_lon_data(wheel_speed_RR);
-        acc_val_RR = lon_control_rr->calc_gas_n_brake();
-
-        double c_mode_condition = 0.6;
-        double c_mode_gain = 2.0;
-        if (control_mode == 1 || control_mode == 2)
-        {
-            c_mode_gain = 0.5;
-        }
-        else{
-            docking_mode = 0;
-        }
-        // RCLCPP_INFO(this->get_logger(), "Docking_mode: %d, Control_mode: %d", docking_mode, control_mode);
-        if (std::fabs(heading_error) > 0.523599)
-       	{
-             turn_mode = true;
-       	}
-	if (turn_mode && (std::fabs(heading_error) < 0.087266))
-	{
-             turn_mode = false;
-	}
-	
-        
-	if (turn_mode)
-	{
-	    if (heading_error < 0.0) {
-                target_yr = -target_speed / 0.625;
-            }
-            else if (heading_error > 0.0){
-                target_yr = target_speed / 0.625;
-            }
-            
-             target_speed_x = 0.0;
-             target_speed_y = 0.0;	
-	}
-
-
-        if (test)
-        {
-            if (control_mode == 1 || control_mode == 2)
-            {
-
-                target_speed_x = kimm_ci_dk.vx;
-                target_speed_y = kimm_ci_dk.vy;
-                target_yr = kimm_ci_dk.yr;
-
-                if (docking_mode == 1){
-                    target_speed_x = 0;
-                    target_speed_y = 0;
-                    if (lat_control->get_yr_error() < 0.0) {
-               	 target_yr = -target_speed / 0.625;
-           	 }
-           	 else if (lat_control->get_yr_error() > 0.0){
-            	    target_yr = target_speed / 0.625;
-            	}
-                }
-                else
-                {
-                    target_yr = 0;
-                }
+        // // 1. 시간 관련 업데이트
+        // updateTimeDiff(start_time);  // ROS Time 사용
+
+        // 2. 파라미터 업데이트
+        updateParameters();
+
+        // 3. 차량 상태 업데이트
+        VehicleState current_state = updateVehicleState();
+
+        // 4. 제어 모드에 따른 제어 입력 계산
+        ControlInput control_input_kimm_sim, control_input_real_vehicle, control_input_scout;
+        PointFR steerAngle_kimm_sim, steerAngle_real_vehicle, steerAngle_input_scout;
+        MotionCalculator::WheelSpeeds wheel_speeds_kimm_sim, wheel_speeds_real_vehicle, wheel_speeds_scout;
+
+        ControlMode current_mode = static_cast<ControlMode>(cb_data->get_control_mode());
+        updateDockingMode(current_mode);
+
+        switch(current_mode) {
+            case ControlMode::NORMAL:
+                calculateNormalControl(current_state, control_input_kimm_sim, control_input_real_vehicle, control_input_scout, 
+                    steerAngle_kimm_sim, steerAngle_real_vehicle, steerAngle_input_scout, wheel_speeds_kimm_sim, wheel_speeds_real_vehicle, wheel_speeds_scout);
+                break;
+            case ControlMode::DOCKING:
+                calculateDockingControl(current_state, control_input_kimm_sim, control_input_real_vehicle,
+                    steerAngle_kimm_sim, steerAngle_real_vehicle, current_mode, wheel_speeds_kimm_sim, wheel_speeds_real_vehicle, wheel_speeds_scout);
+                break;
+            case ControlMode::ARRIVAL:
+                calculateDockingControl(current_state, control_input_kimm_sim, control_input_real_vehicle,
+                    steerAngle_kimm_sim, steerAngle_real_vehicle, current_mode, wheel_speeds_kimm_sim, wheel_speeds_real_vehicle, wheel_speeds_scout);
+                break;
+            case ControlMode::STOP:
+                // 모든 제어 입력을 0으로 설정
+                control_input_kimm_sim = {0.0, 0.0, 0.0};
+                control_input_real_vehicle = {0.0, 0.0, 0.0};
+                control_input_scout = {0.0, 0.0, 0.0};
                 
-                // cout << "Docking Mode!" << endl;
-            } 
-            else{
-                target_speed_x = kimm_ci.vx;
-                target_speed_y = 0;
-                target_yr = kimm_ci.yr;
-            }
+                // 모든 조향각과 휠 속도를 0으로 설정
+                steerAngle_kimm_sim = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                steerAngle_real_vehicle = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                steerAngle_input_scout = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                wheel_speeds_kimm_sim = {0.0, 0.0, 0.0, 0.0};
+                wheel_speeds_real_vehicle = {0.0, 0.0, 0.0, 0.0};
+                wheel_speeds_scout = {0.0, 0.0, 0.0, 0.0};
+                break;
+            default:
+                break;
         }
-        
-        
-        
-	
-        // if(c_mode)
-        // {
-        //     if (abs(target_speed_y) < abs(target_yr*(L/2)) * c_mode_gain * c_mode_condition)
-        //     {
-        //         c_mode = false;
-        //     }
-        // }
-        // else{
-        //     if (abs(target_speed_y)* c_mode_condition > abs(target_yr*(L/2)) * c_mode_gain)
-        //     {
-        //         c_mode = true;
-        //     }
-        // }
+
+        // 5. 제어 명령 발행
+        publishControlCommands(control_input_real_vehicle, steerAngle_kimm_sim, wheel_speeds_kimm_sim);
+
+        // 6. 디버그 정보 발행
+        // rclcpp::Time end_time = this->now();
+        // rclcpp::Duration execution_time = end_time - current_time;
+        publishDebugInfo(steerAngle_real_vehicle, control_input_kimm_sim);
 
 
-        // if ((abs(target_speed_y) < 0.4) && (abs(target_yr*(L/2))  * c_mode_gain< 0.6)){
-        //     c_mode = false;
-        // }
-
-        // if (c_mode){
-        //     target_yr = 0;
-        // }
-
-        // else{
-            
-        //     target_speed_y = 0; 
-
-        // }
-
-        double alpha = 0.006;
-        target_speed_x = applyLPF(target_speed_x, target_speed_x_prev, alpha);
-        target_speed_y = applyLPF(target_speed_y, target_speed_y_prev, alpha);
-        target_yr = applyLPF(target_yr, target_yr_prev, alpha);
-
-        target_speed_x_prev = target_speed_x; 
-        target_speed_y_prev = target_speed_y;
-        target_yr_prev = target_yr;
-
+        return;
+    }
 
     
 
-        switch (control_sw)
-        {
+    // void updateTimeDiff(const rclcpp::Time& current_time) {
+    //     if (last_execution_time_.nanoseconds() != 0) {  // 첫 실행이 아닌 경우에만
+    //         auto time_diff = current_time - last_execution_time_;
+    //         time_diff_ms_ = time_diff.seconds() * 1000.0;
+    //     }
+    //     last_execution_time_ = current_time;
+    // }
+    
+    void updateParameters() {
+        param_manage->read_json();
+        param_manage->set_normal_param();
+        wheel_radius = param_manage->getWheelRadius();
+        L = param_manage->getWheelbase();
+        Lf = param_manage->getFrontLength();
+        width = param_manage->getTrackWidth();
+        deltaMax = param_manage->getMaxSteerAngle();
+    }
+    
+    VehicleState updateVehicleState() {
+        VehicleState state;
+        
+        // 기본 상태
+        state.speed = lon_control->get_target_speed() / 3.6;
+        state.yaw = cb_data->get_yaw();
+        state.yaw_rate = cb_data->get_yawrate();
+        state.position = cb_data->get_odom();
+        
+        // 전방 위치
+        state.position_lf = {param_manage->getFrontLength(), 0.0};
+        
+        // 경로 관련 상태
+        state.path_states.lateral_error = cb_data->calc_n_get_lat_error();
+        state.path_states.lateral_error_lf = cb_data->calc_n_get_lat_error(state.position_lf);
+        state.path_states.curvature = cb_data->calc_path_curvature_center(1.0);
+        state.path_states.path_yaw = cb_data->get_pd_path_yaw();
+        return state;
+    }
+    void calculateNormalControl(
+        const VehicleState& state,
+        ControlInput& control_input_kimm_sim,
+        ControlInput& control_input_real_vehicle,
+        ControlInput& control_input_scout,
+        PointFR& steerAngle_kimm_sim,
+        PointFR& steerAngle_real_vehicle,
+        PointFR& steerAngle_scout,
+        MotionCalculator::WheelSpeeds& wheel_speeds_kimm_sim,
+        MotionCalculator::WheelSpeeds& wheel_speeds_real_vehicle,
+        MotionCalculator::WheelSpeeds& wheel_speeds_scout
+    ) {
+        // 1. 기본 제어 입력 계산
+        double target_speed = lon_control->get_target_speed() / 3.6;
+        
+        // 2. Lateral Control 업데이트
+        lat_control->set_stanly_data(state.speed, 
+                                    state.path_states.path_yaw, 
+                                    state.yaw, 
+                                    state.path_states.lateral_error);
+        lat_control->set_curvature(state.path_states.curvature);
+        lat_control->set_kimm_control_data(state.speed, 
+                                         state.path_states.path_yaw, 
+                                         state.yaw, 
+                                         state.path_states.lateral_error, 
+                                         state.path_states.lateral_error_lf);
+        lat_control->set_odom(state.position.x, state.position.y);
 
-        case true: // 정지 모드
+        // 3. KIMM Simulation 제어 입력 계산
+        control_input_real_vehicle = lat_control->calc_control_input_real_car();
+        control_input_kimm_sim = lat_control->calc_control_input_sim();
+        control_input_scout = control_input_real_vehicle;
+  
+        steerAngle_kimm_sim = MotionCalculator::calculate4WSAngles(
+            control_input_kimm_sim,
+            param_manage->getTrackWidth(),
+            param_manage->getWheelbase(),
+            param_manage->getMaxSteerAngle()
+        );
+        wheel_speeds_kimm_sim = MotionCalculator::calculateWheelSpeeds(
+            control_input_kimm_sim,
+            steerAngle_kimm_sim,
+            param_manage->getTrackWidth(),
+            param_manage->getWheelbase()
+        );
+    }
 
-            acc_val_FL.gas = 0.0;
-            acc_val_FR.gas = 0.0;
-            acc_val_RL.gas = 0.0;
-            acc_val_RR.gas = 0.0;
-
-            target_yr = 0.0;
-            target_speed_x = 0.0;
-            target_speed_y = 0.0;
-
-            cout << "Stop Mode!!" << endl;
-
-            break;
-
-        case false: // normal 모드
-            break;
+    void updateDockingMode(ControlMode current_mode) {
+        // NORMAL -> DOCKING/ARRIVAL 전환 시에만 docking_mode를 1로 설정
+        if (current_mode == ControlMode::DOCKING &&  control_mode_pre == ControlMode::NORMAL) {
+            docking_mode = 1;
+        }
+        // NORMAL 모드일 때는 docking_mode를 0으로 설정
+        else if (current_mode == ControlMode::NORMAL) {
+            docking_mode = 0;
+        }
+        // docking_mode 상태 전이 로직
+        else if (current_mode == ControlMode::DOCKING) {
+            if (docking_mode == 1 && 
+                std::fabs(normalizeAngle(lat_control->get_yr_error())) < param_manage->getYawThreshold()) {
+                docking_mode = 2;
+            }
+            else if (docking_mode == 2 && 
+                        sqrt(pow(lat_control->get_x_error(),2) + pow(lat_control->get_y_error(),2)) < 0.05) {
+                docking_mode = 1;
+            }
+        }
+        if (current_mode == ControlMode::ARRIVAL && control_mode_pre == ControlMode::NORMAL) {
+            docking_mode = 1;
+        }
+        // NORMAL 모드일 때는 docking_mode를 0으로 설정
+        else if (current_mode == ControlMode::NORMAL) {
+            docking_mode = 0;
+        }
+        // docking_mode 상태 전이 로직
+        else if (current_mode == ControlMode::ARRIVAL) {
+            if (docking_mode == 1 && 
+                std::fabs(normalizeAngle(lat_control->get_yr_error())) < param_manage->getYawThreshold()) {
+                docking_mode = 2;
+            }
+            else if (docking_mode == 2 && 
+                        sqrt(pow(lat_control->get_x_error(),2) + pow(lat_control->get_y_error(),2)) < 0.05) {
+                docking_mode = 1;
+            }
         }
 
-        switch (control_mode)
+        control_mode_pre = current_mode;
+    }
+    void calculateDockingControl(
+            const VehicleState& state,
+            ControlInput& control_input_kimm_sim,
+            ControlInput& control_input_real_vehicle,
+            PointFR& steerAngle_kimm_sim,
+            PointFR& steerAngle_real_vehicle,
+            ControlMode& current_mode,
+            MotionCalculator::WheelSpeeds& wheel_speeds_kimm_sim,
+            MotionCalculator::WheelSpeeds& wheel_speeds_real_vehicle,
+            MotionCalculator::WheelSpeeds& wheel_speeds_scout
+            ) {
+        // 1. 도킹 목표점 설정
+        lat_control->set_goal_point(
+            cb_data->get_target_point_x(),
+            cb_data->get_target_point_y(),
+            cb_data->get_target_point_yaw()
+        );
+        lat_control->set_odom(state.position.x, state.position.y);
+
+        // 2. 도킹 제어 입력 계산
+        control_input_kimm_sim = lat_control->get_calc_docking_control_input();
+        control_input_real_vehicle = lat_control->get_calc_docking_control_input();
+
+        if (current_mode == ControlMode::ARRIVAL)
         {
-
-        case 3: // 정지 모드
-
-            acc_val_FL.gas = 0.0;
-            acc_val_FR.gas = 0.0;
-            acc_val_RL.gas = 0.0;
-            acc_val_RR.gas = 0.0;
-
-            target_yr = 0.0;
-            target_speed_x = 0.0;
-            target_speed_y = 0.0;
-
-            cout << "Stop Mode!!" << endl;
-
-            break;
-
-        case false: // normal 모드
-            break;
+            control_input_real_vehicle.yr = lat_control->calc_static_yaw_rate();
+        }   
+        // 3. 주행 방향 결정
+        const double epsilon = 0.1;
+        if (driving_state == DrivingState::FORWARD && control_input_real_vehicle.vx < -epsilon) {
+            driving_state = DrivingState::REVERSE;
+        }
+        else if (driving_state == DrivingState::REVERSE && control_input_real_vehicle.vx > epsilon) {
+            driving_state = DrivingState::FORWARD;
         }
 
- 
-        // ---------------------------------------------------------- </계산>
-        // <ros topic pub> -------------------------------------------------
+        // 4. 주행 방향에 따른 속도 부호 조정
+        double vx_sign = (driving_state == DrivingState::FORWARD) ? 1.0 : -1.0;
+        control_input_real_vehicle.vx = std::fabs(control_input_real_vehicle.vx) * vx_sign;
 
-        // 제어 값 pub
+        // 5. 최소 속도 처리
+        if (std::fabs(control_input_real_vehicle.vx) < 0.05) {
+            control_input_real_vehicle.vx = 0.0;
+        }
 
+
+        // 9. 도킹 모드에 따른 제어 입력 조정
+        if (docking_mode == 1) {
+            control_input_real_vehicle.vx = 0;
+            control_input_real_vehicle.vy = 0;
+        }
+        else if (docking_mode == 2) {
+            control_input_real_vehicle.yr = 0;
+        }
+
+        steerAngle_kimm_sim = MotionCalculator::calculate4WSAngles(
+            control_input_kimm_sim,
+            param_manage->getTrackWidth(),
+            param_manage->getWheelbase(),
+            param_manage->getMaxSteerAngle()
+        );
+        wheel_speeds_kimm_sim = MotionCalculator::calculateWheelSpeeds(
+            control_input_kimm_sim,
+            steerAngle_kimm_sim,
+            param_manage->getTrackWidth(),
+            param_manage->getWheelbase()
+        );
+
+    }
+
+    void publishControlCommands(const ControlInput& control_input, const PointFR& steerAngle,
+        const MotionCalculator::WheelSpeeds& wheel_speeds_kimm_sim) {
+        
+        // 1. 차량 데이터 발행
+        publishCarData(steerAngle, wheel_speeds_kimm_sim);
+        
+        // 2. Twist 메시지 발행
+        publishTwistCommand(control_input);
+        
+        // 3. Isaac 명령 발행
+        publishIsaacCommands(steerAngle, wheel_speeds_kimm_sim);
+    }
+
+    void publishDebugInfo(const PointFR& steerAngle, ControlInput control_input_kimm_sim) {
+        auto msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
+        msg->data.clear();
+
+        msg->data = {
+            lon_control->get_target_speed() / 3.6, //1
+            cb_data->get_pd_path_yaw(), //2
+            cb_data->calc_n_get_lat_error(), //3
+            lat_control->get_x_error(), //4
+            lat_control->get_y_error(), //5
+            normalizeAngle(lat_control->get_yr_error()), //6
+            control_input_kimm_sim.vx, //7
+            control_input_kimm_sim.vy, //8
+            control_input_kimm_sim.yr, //9
+            steerAngle.F, //10
+            steerAngle.R, //11
+            steerAngle.FL, //12
+            steerAngle.RL, //13
+            cb_data->get_target_point_x(), //14
+            cb_data->get_target_point_y(), //15
+            cb_data->get_target_point_yaw() //16
+        };
+
+        tmp_data_pub->publish(*msg);
+    }
+    
+
+    void publishCarData(const PointFR& steerAngle, const MotionCalculator::WheelSpeeds& wheel_speeds) {
         auto car_data_msg = std::make_shared<std_msgs::msg::Float32MultiArray>();
 
-        car_data_msg->data.push_back(acc_val_FL.gas / wheel_radius);
-        car_data_msg->data.push_back(acc_val_FR.gas / wheel_radius);
-        car_data_msg->data.push_back(acc_val_RL.gas / wheel_radius);
-        car_data_msg->data.push_back(acc_val_RR.gas / wheel_radius);
+        // 휠 속도 데이터 추가
+        car_data_msg->data.push_back(wheel_speeds.fl / wheel_radius);
+        car_data_msg->data.push_back(wheel_speeds.fr / wheel_radius);
+        car_data_msg->data.push_back(wheel_speeds.rl / wheel_radius);
+        car_data_msg->data.push_back(wheel_speeds.rr / wheel_radius);
 
+        // 조향각 데이터 추가
         car_data_msg->data.push_back(steerAngle.FL);      
         car_data_msg->data.push_back(steerAngle.FR);   
         car_data_msg->data.push_back(steerAngle.RL);    
         car_data_msg->data.push_back(steerAngle.RR);   
 
+        ranger_data_pub->publish(*car_data_msg);
+    }
 
-
-
-        ranger_data_pub->publish(*car_data_msg);  
-
-        // 제어 방식 2
-
-        
-
+    void publishTwistCommand(const ControlInput& control_input) {
         auto twist_msg = std::make_shared<geometry_msgs::msg::Twist>();
-
-
-        if (control_method == 0)
-        {
-            twist_msg->linear.x = target_speed_x;
-            twist_msg->linear.y = target_speed_y;
-            twist_msg->angular.z = target_yr;
-        }
-        else
-        {
-            twist_msg->linear.x = kimm_ci.vx;
-            twist_msg->linear.y = kimm_ci.vy;
-            twist_msg->angular.z = kimm_ci.yr;
-        }
         
-
-
-        cmd_vel_pub->publish(*twist_msg);  
-
-
+        twist_msg->linear.x = control_input.vx;
+        twist_msg->linear.y = control_input.vy;
+        twist_msg->angular.z = control_input.yr;
         
+        cmd_vel_pub->publish(*twist_msg);
+    }
 
-        auto issac_cmd_msgs =  std::make_shared<sensor_msgs::msg::JointState>();
+    void publishIsaacCommands(const PointFR& steerAngle, const MotionCalculator::WheelSpeeds& wheel_speeds) {
+        auto issac_cmd_msgs = std::make_shared<sensor_msgs::msg::JointState>();
 
-        double wheel_diff_FL = std::fabs(wheel_steer_FL - steerAngle_dk.FL);
-        double wheel_diff_FR = std::fabs(wheel_steer_FR - steerAngle_dk.FR);
-        double wheel_diff_RL = std::fabs(wheel_steer_RL - steerAngle_dk.RL);
-        double wheel_diff_RR = std::fabs(wheel_steer_RR - steerAngle_dk.RR);
- 
-        std::vector<double> steering_position_ = {
-            steerAngle_dk.FL,   // Front Left
-            steerAngle_dk.FR,   // Front Right
-            steerAngle_dk.RL,   // Rear Left
-            steerAngle_dk.RR    // Rear Right
+        // 현재 조향각과의 차이 계산
+        double wheel_diff_FL = std::fabs(cb_data->get_wheel_steer_FL() - steerAngle.FL);
+        double wheel_diff_FR = std::fabs(cb_data->get_wheel_steer_FR() - steerAngle.FR);
+        double wheel_diff_RL = std::fabs(cb_data->get_wheel_steer_RL() - steerAngle.RL);
+        double wheel_diff_RR = std::fabs(cb_data->get_wheel_steer_RR() - steerAngle.RR);
+
+        // 조향 위치 설정
+        std::vector<double> steering_position = {
+            steerAngle.FL,   // Front Left
+            steerAngle.FR,   // Front Right
+            steerAngle.RL,   // Rear Left
+            steerAngle.RR    // Rear Right
         };
 
-        // Set target speeds for each wheel
-        std::vector<double> wheel_velocity_ = {
-            acc_val_FL.gas, // Front Left
-            acc_val_FR.gas, // Front Right
-            acc_val_RL.gas, // Rear Left
-            acc_val_RR.gas  // Rear Right
+        // 휠 속도 설정
+        std::vector<double> wheel_velocity = {
+            wheel_speeds.fl,  // Front Left
+            wheel_speeds.fr,  // Front Right
+            wheel_speeds.rl,  // Rear Left
+            wheel_speeds.rr   // Rear Right
         };
 
-        // std::vector<double> wheel_velocity_ = {
-        //     target_speed_dk_FL, // Front Left
-        //     target_speed_dk_FR, // Front Right
-        //     target_speed_dk_RL, // Rear Left
-        //     target_speed_dk_RR  // Rear Right
-        // };
-
-
+        // Joint 이름 설정
         issac_cmd_msgs->name = {
             "fl_steering_wheel_joint", 
             "fr_steering_wheel_joint", 
@@ -680,84 +530,23 @@ public:
             "rr_wheel_joint"
         };
 
-        issac_cmd_msgs->position = steering_position_;
-        issac_cmd_msgs->position.resize(8, NAN); 
-        issac_cmd_msgs->velocity.resize(8, NAN);  // 4개의 바퀴와 4개의 조향 관절 (총 8개)
-        std::copy(wheel_velocity_.begin(), wheel_velocity_.end(), issac_cmd_msgs->velocity.begin() + 4);
+        // 위치와 속도 데이터 설정
+        issac_cmd_msgs->position = steering_position;
+        issac_cmd_msgs->position.resize(8, NAN);
+        issac_cmd_msgs->velocity.resize(8, NAN);
+        std::copy(wheel_velocity.begin(), wheel_velocity.end(), issac_cmd_msgs->velocity.begin() + 4);
 
-        issac_cmd_msgs->velocity[5] = -issac_cmd_msgs->velocity[5];
-        issac_cmd_msgs->velocity[7] = -issac_cmd_msgs->velocity[7];
-     
-        if (std::max({wheel_diff_FL,wheel_diff_FR,wheel_diff_RL,wheel_diff_RR}) > 0.1745)
-        {
-            issac_cmd_msgs->velocity[4] = 0.0;
-            issac_cmd_msgs->velocity[5] = 0.0;
-            issac_cmd_msgs->velocity[6] = 0.0;
-            issac_cmd_msgs->velocity[7] = 0.0;
+        // 오른쪽 휠 방향 반전
+        // issac_cmd_msgs->velocity[5] = -issac_cmd_msgs->velocity[5];
+        // issac_cmd_msgs->velocity[7] = -issac_cmd_msgs->velocity[7];
 
+        // 조향각 차이가 큰 경우 휠 속도 0으로 설정
+        if (std::max({wheel_diff_FL, wheel_diff_FR, wheel_diff_RL, wheel_diff_RR}) > 0.0872665) {
+            std::fill(issac_cmd_msgs->velocity.begin() + 4, issac_cmd_msgs->velocity.end(), 0.0);
         }
 
-        if (sqrt(pow(lat_control->get_x_error(),2)+pow(lat_control->get_y_error(),2)) < 0.05 && std::fabs(nomalize_angle(lat_control->get_yr_error())) < 0.05)
-        {
-            issac_cmd_msgs->velocity[4] = 0.0;
-            issac_cmd_msgs->velocity[5] = 0.0;
-            issac_cmd_msgs->velocity[6] = 0.0;
-            issac_cmd_msgs->velocity[7] = 0.0;
-
-            issac_cmd_msgs->position[0] = 0.0;
-            issac_cmd_msgs->position[1] = 0.0;
-            issac_cmd_msgs->position[2] = 0.0;
-            issac_cmd_msgs->position[3] = 0.0;
+        issac_cmd_pub->publish(*issac_cmd_msgs);
         }
-
-        issac_cmd_pub->publish(*issac_cmd_msgs); // ys!!
-
-        // 디버그용 토픽
-        auto tmp_plot_val_msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
- 
-        tmp_plot_val_msg->data.push_back(docking_mode);                         //1
-        tmp_plot_val_msg->data.push_back(control_mode);                           //2
-        tmp_plot_val_msg->data.push_back(lat_control->get_x_error());  
-        tmp_plot_val_msg->data.push_back(lat_control->get_y_error());                        //4
-        tmp_plot_val_msg->data.push_back((lat_control->get_yr_error()));     //5
-        tmp_plot_val_msg->data.push_back(lat_error);                     //6
-        tmp_plot_val_msg->data.push_back(nomalize_angle(pd_path_yaw- yaw));                     //7
-        tmp_plot_val_msg->data.push_back(pd_path_yaw);                     //8
-        tmp_plot_val_msg->data.push_back(steerAngle_dk.F);                     //9 
-        tmp_plot_val_msg->data.push_back(steerAngle_dk.R);  
-        tmp_plot_val_msg->data.push_back(steerAngle_dk.FL);                     //9 
-        tmp_plot_val_msg->data.push_back(steerAngle_dk.RL);  
-
-
-
-        auto end_time = std::chrono::steady_clock::now();
-        auto duration = end_time - start_time;
-        double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count()* 1000.0;
-
-
-
-        tmp_plot_val_msg->data.push_back(seconds); 
-        tmp_plot_val_msg->data.push_back(time_diff_ms); 
-
-        for (size_t i = 0; i < rel_local_path.size(); i += 5)
-        {
-            Point tmp_p = rel_local_path[i];
-
-            tmp_plot_val_msg->data.push_back(tmp_p.x);  
-            tmp_plot_val_msg->data.push_back(tmp_p.y);      
-            
-        }
-
-        
-        
-
-        
-
-        tmp_data_pub->publish(*tmp_plot_val_msg);
-        
-
-        return;
-    }
 };
 
 int main(int argc, char **argv)
@@ -766,7 +555,7 @@ int main(int argc, char **argv)
     auto node = std::make_shared<CarControl>();
     rclcpp::spin(node);
     rclcpp::shutdown();
-
     return 0;
 }
+
 

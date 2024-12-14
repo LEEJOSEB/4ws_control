@@ -1,11 +1,23 @@
 { 
+  
   "normal": {
     "______lllllllllllllll______": {
       "gear": 0,
-      "target_speed": 2.0,
+      "target_speed": 10.0,
 
       "PD_gas_gain": [0.0, 0.0]
 
+    },
+
+    "vehicle_params": {
+      "wheel_radius": 0.105,
+      "wheelbase": 1.217959,
+      "track_width": 0.542,
+      "max_steer_angle": 1.5708,
+      "front_length": 0.608979,
+      "safe_min_speed": 0.01,
+      "stop_threshold": 0.05,
+      "yaw_threshold": 0.07
     },
     
     "______---------------______": {
@@ -17,11 +29,12 @@
 
     "______kimm______": {
       "_":"------------------------------kimm-------------p_vx vy yr i vx vy yr d vx vy yr",
-      "kimm_gain": 0.25,
-      "kimm_hd_rangge_div": 6.0,
-      "kimm_heading_gain": 0.25,
-      "kimm_docking_gain": [1.0, 0.3, 0.65, 0.05, 0.008, 0.02, 0.0, 6.0, 0.0],
-      "kimm_docking_anti_wind_up" : [1.0, 0.5, 1.0]
+      "kimm_gain": 1.0,
+      "kimm_hd_rangge_div": 3.0,
+      "kimm_heading_gain": 1.0,
+      "kimm_docking_gain": [1.0, 0.3, 0.65, 0.000, 0.1, 0.02, 0.0, 6.0, 0.0],
+      "kimm_docking_anti_wind_up" : [0.0, 0.0, 0.0],
+      "kimm_docking_anti_wind_up_tmp" : [0.0, 5.0, 1.0]
     },
     
     "______kkkkkkkkkkkkkkk______": {
